@@ -11,8 +11,11 @@ export function sha1Hex(data: Buffer): string {
 export type ObjType = 'commit' | 'tree' | 'blob' | 'tag';
 
 export function objectId(type: ObjType, data: Buffer): string {
-  const header = Buffer.from(`${type} ${data.length}\0`, 'ascii');
-  return sha1Hex(Buffer.concat([header, data]));
+  // Hash the header and the body in two updates: no Buffer.concat allocation.
+  const hash = createHash('sha1');
+  hash.update(`${type} ${data.length}\0`, 'ascii');
+  hash.update(data);
+  return hash.digest('hex');
 }
 
 export function objectRaw(type: ObjType, data: Buffer): Buffer {
@@ -124,7 +127,9 @@ export function parsePktLines(buf: Buffer): PktLine[] {
     if (len === 1) { out.push({ kind: 'delim', data: Buffer.alloc(0) }); off += 4; continue; }
     if (len === 2) { out.push({ kind: 'response-end', data: Buffer.alloc(0) }); off += 4; continue; }
     if (off + len > buf.length) break;
-    out.push({ kind: 'data', data: Buffer.from(buf.subarray(off + 4, off + len)) });
+    // A view into the request buffer, not a copy: callers only read it
+    // within this request, and the body stays alive for the whole handler.
+    out.push({ kind: 'data', data: buf.subarray(off + 4, off + len) });
     off += len;
   }
   return out;
@@ -179,46 +184,21 @@ export function applyDelta(base: Buffer, delta: Buffer): Buffer {
 
 export interface PackObject { type: ObjType; data: Buffer; }
 
-/** Adler-32 checksum (the zlib stream trailer). */
-function adler32(buf: Buffer): number {
-  let a = 1;
-  let b = 0;
-  for (let i = 0; i < buf.length; i += 1) {
-    a = (a + buf[i]) % 65521;
-    b = (b + a) % 65521;
-  }
-  return ((b << 16) | a) >>> 0;
-}
-
-/** Inflate a zlib stream starting at buf[0] and report exactly how many bytes it consumed.
- *  Node's inflateSync ignores trailing bytes and throws on truncation, so one call
- *  yields the decompressed data; the stream's end is then located by scanning for
- *  the Adler-32 trailer (big-endian, the last 4 bytes of the stream) and verified
- *  by re-inflating the exact slice — a false-positive match is detected because
- *  the truncated slice fails to inflate. Two inflateSync calls per object instead
- *  of a ~15-call binary search. */
+/** Inflate one zlib stream starting at buf[0] and report exactly how many bytes
+ *  it consumed — a single inflateSync call. With `{ info: true }` the engine
+ *  reports `bytesWritten`, the input bytes the stream consumed, so there is no
+ *  Adler-32 scan, no indexOf hunt for the trailer, and no second inflate to
+ *  verify the slice. zlib validates the Adler-32 trailer itself (a corrupt
+ *  stream throws Z_DATA_ERROR), so the length is exact by construction. */
 function inflateWithLength(buf: Buffer): { data: Buffer; consumed: number } {
-  let data: Buffer;
   try {
-    data = iz(buf);
+    const { buffer: data, engine } = iz(buf, { info: true }) as unknown as {
+      buffer: Buffer;
+      engine: { bytesWritten: number };
+    };
+    return { data, consumed: engine.bytesWritten };
   } catch {
     throw new Error('cannot inflate pack object');
-  }
-  const adler = adler32(data);
-  const needle = Buffer.alloc(4);
-  needle.writeUInt32BE(adler, 0);
-  let pos = 2; // skip the 2-byte zlib header
-  for (;;) {
-    const idx = buf.indexOf(needle, pos);
-    if (idx === -1) throw new Error('cannot find zlib stream end');
-    const end = idx + 4;
-    try {
-      const check = iz(buf.subarray(0, end));
-      if (check.equals(data)) return { data, consumed: end };
-    } catch {
-      // false-positive Adler match inside the deflate data; keep scanning
-    }
-    pos = idx + 1;
   }
 }
 

@@ -161,8 +161,9 @@ export class Store {
   ancestors(repo: Repo, oid: string): Set<string> {
     const seen = new Set<string>();
     const queue: string[] = [oid];
-    while (queue.length > 0) {
-      const cur = queue.shift()!;
+    let qHead = 0;
+    while (qHead < queue.length) {
+      const cur = queue[qHead]!; qHead += 1;
       if (seen.has(cur) || cur === ZERO_OID) continue;
       seen.add(cur);
       const info = this.commitInfo(repo, cur);
@@ -178,8 +179,9 @@ export class Store {
     // finds its old tip in 1-2 steps instead of walking the whole history.
     const seen = new Set<string>();
     const queue: string[] = [oid];
-    while (queue.length > 0) {
-      const cur = queue.shift()!;
+    let qHead = 0;
+    while (qHead < queue.length) {
+      const cur = queue[qHead]!; qHead += 1;
       if (seen.has(cur) || cur === ZERO_OID) continue;
       seen.add(cur);
       if (cur === maybeAncestor) return true;
@@ -193,8 +195,9 @@ export class Store {
     const ancestorsA = this.ancestors(repo, a);
     const queue: string[] = [b];
     const seen = new Set<string>();
-    while (queue.length > 0) {
-      const cur = queue.shift()!;
+    let qHead = 0;
+    while (qHead < queue.length) {
+      const cur = queue[qHead]!; qHead += 1;
       if (seen.has(cur) || cur === ZERO_OID) continue;
       seen.add(cur);
       if (ancestorsA.has(cur)) return cur;

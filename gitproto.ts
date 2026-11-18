@@ -161,8 +161,9 @@ function selectFetchObjects(
     }
   }
   const seen = new Set<string>();
-  while (queue.length > 0) {
-    const { oid, gen } = queue.shift()!;
+  let qHead = 0;
+  while (qHead < queue.length) {
+    const { oid, gen } = queue[qHead]!; qHead += 1;
     if (seen.has(oid)) continue;
     seen.add(oid);
     const obj = repo.objects.get(oid);
@@ -228,8 +229,9 @@ function selectFetchObjects(
       if (h === w) { ack = h; break; }
       const ancestors = new Set<string>();
       const q = [w];
-      while (q.length > 0) {
-        const cur = q.shift()!;
+      let qHead = 0;
+      while (qHead < q.length) {
+        const cur = q[qHead]!; qHead += 1;
         if (ancestors.has(cur)) continue;
         ancestors.add(cur);
         const o = repo.objects.get(cur);
@@ -242,11 +244,22 @@ function selectFetchObjects(
   return { objects: toSend, shallow: [...boundary], unshallow, ack };
 }
 
+/** One sideband pkt-line (band byte 1 + payload) in a single allocation:
+ *  4-byte hex length, 1 band byte, payload — no nested Buffer.concat. */
+function sidebandLine(payload: Buffer): Buffer {
+  const total = payload.length + 5;
+  const buf = Buffer.alloc(total);
+  buf.write(total.toString(16).padStart(4, '0'), 0, 'ascii');
+  buf[4] = 1;
+  payload.copy(buf, 5);
+  return buf;
+}
+
 function sidebandPack(pack: Buffer): Buffer {
   const parts: Buffer[] = [];
   for (let off = 0; off < pack.length; off += SIDEBAND_CHUNK) {
     const chunk = pack.subarray(off, Math.min(pack.length, off + SIDEBAND_CHUNK));
-    parts.push(pktLine(Buffer.concat([Buffer.from([1]), chunk])));
+    parts.push(sidebandLine(chunk));
   }
   return Buffer.concat(parts);
 }
@@ -494,7 +507,7 @@ export function handleReceivePack(repo: Repo | undefined, body: Buffer): GitResp
     // sideband pkt-line whose payload is 0x01 + the report pkt-line.
     const parts: Buffer[] = [];
     for (const line of reportLines) {
-      parts.push(pktLine(Buffer.concat([Buffer.from([1]), pktLine(line)])));
+      parts.push(sidebandLine(pktLine(line)));
     }
     parts.push(FLUSH_PKT);
     return { status: 200, contentType, body: Buffer.concat(parts) };
@@ -507,8 +520,9 @@ function isFastForward(repo: Repo, current: string, next: string): boolean {
   // next must be a descendant of current (or equal).
   const queue = [next];
   const seen = new Set<string>();
-  while (queue.length > 0) {
-    const cur = queue.shift()!;
+  let qHead = 0;
+  while (qHead < queue.length) {
+    const cur = queue[qHead]!; qHead += 1;
     if (cur === current) return true;
     if (seen.has(cur)) continue;
     seen.add(cur);

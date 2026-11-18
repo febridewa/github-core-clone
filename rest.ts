@@ -104,8 +104,9 @@ function listCommits(store: Store, repo: Repo, tip: string): { sha: string; mess
   const out: { sha: string; message: string }[] = [];
   const seen = new Set<string>();
   const queue: string[] = [tip];
-  while (queue.length > 0) {
-    const cur = queue.shift()!;
+  let qHead = 0;
+  while (qHead < queue.length) {
+    const cur = queue[qHead]!; qHead += 1;
     if (seen.has(cur) || cur === ZERO_OID) continue;
     seen.add(cur);
     const info = store.commitInfo(repo, cur);

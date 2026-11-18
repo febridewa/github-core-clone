@@ -23,19 +23,20 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
       }
       chunks.push(chunk);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
+    // Small bodies arrive in one chunk: return it directly, no concat copy.
+    req.on('end', () => resolve(chunks.length === 1 ? chunks[0]! : Buffer.concat(chunks)));
     req.on('error', reject);
   });
 }
 
-function headersObject(req: IncomingMessage): Record<string, string | string[] | undefined> {
-  const out: Record<string, string | string[] | undefined> = {};
-  for (const [k, v] of Object.entries(req.headers)) out[k.toLowerCase()] = v;
-  return out;
-}
+// Shared empty query params (most GETs carry no query string).
+const EMPTY_PARAMS = new URLSearchParams();
 
 function send(res: ServerResponse, status: number, headers: Record<string, string>, body: Buffer): void {
-  res.writeHead(status, { ...headers, 'Content-Length': String(body.length) });
+  // The headers object is freshly built at every call site, so stamping
+  // Content-Length on it directly avoids one spread allocation per reply.
+  headers['Content-Length'] = String(body.length);
+  res.writeHead(status, headers);
   res.end(body);
 }
 
@@ -45,10 +46,16 @@ export function createApp(store?: Store, expectedToken?: string | null) {
   const server = createServer(async (req, res) => {
     const requestId = theStore.nextRequestId();
     try {
-      const url = new URL(req.url ?? '/', 'http://localhost');
-      const path = url.pathname;
+      // Manual path split: `new URL()` per request costs more than the
+      // routing below, and the query string is only parsed where a handler
+      // actually reads it.
+      const rawUrl = req.url ?? '/';
+      const qIndex = rawUrl.indexOf('?');
+      const path = qIndex === -1 ? rawUrl : rawUrl.slice(0, qIndex);
+      const queryString = qIndex === -1 ? '' : rawUrl.slice(qIndex + 1);
       const method = req.method ?? 'GET';
-      const headers = headersObject(req);
+      // Node already lowercases incoming header names; no rebuild needed.
+      const headers = req.headers as Record<string, string | string[] | undefined>;
       const host = req.headers.host ?? 'localhost';
       const proto = (req.headers['x-forwarded-proto'] as string) ?? 'http';
       const origin = `${proto}://${host}`;
@@ -91,7 +98,8 @@ export function createApp(store?: Store, expectedToken?: string | null) {
         const segments = path === '/api/v3' ? [] : path.slice('/api/v3/'.length).split('/').filter((s) => s !== '');
         const body = (method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE')
           ? await readBody(req) : Buffer.alloc(0);
-        const out = handleRest(theStore, expectedTokenValue, method, segments, url.searchParams, headers, body, origin);
+        const query = queryString === '' ? EMPTY_PARAMS : new URLSearchParams(queryString);
+        const out = handleRest(theStore, expectedTokenValue, method, segments, query, headers, body, origin);
         send(res, out.status, out.headers, out.body);
         return;
       }
@@ -112,7 +120,7 @@ export function createApp(store?: Store, expectedToken?: string | null) {
         const repo = owner === theStore.viewerLogin ? theStore.getRepo(owner, repoName) : undefined;
         const gitProtocolV2 = (headers['git-protocol'] ?? '') === 'version=2';
         if (suffix === '/info/refs' && method === 'GET') {
-          const service = url.searchParams.get('service');
+          const service = queryString === '' ? null : new URLSearchParams(queryString).get('service');
           if (service !== 'git-upload-pack' && service !== 'git-receive-pack') {
             send(res, 400, withId({ 'Content-Type': 'application/json' }), Buffer.from(JSON.stringify({ message: 'Bad Request' })));
             return;
